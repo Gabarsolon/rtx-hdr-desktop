@@ -41,7 +41,7 @@ using Microsoft::WRL::ComPtr;
 #endif
 
 #define APP_NAME L"RTX HDR Desktop"
-#define APP_VERSION "1.0.0"
+#define APP_VERSION "1.1.0"
 #define CTRL_CLASS L"RtxHdrDesktopControl"
 #define OVERLAY_CLASS L"RtxHdrDesktopOverlay"
 #define WM_TRAY (WM_APP + 1)
