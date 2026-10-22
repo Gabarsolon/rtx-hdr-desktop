@@ -4,7 +4,7 @@ Applies NVIDIA **RTX HDR** to the whole Windows desktop, or only while one app i
 
 RTX HDR is a driver feature that turns SDR games into HDR. The driver applies it only to programs that draw through a DirectX/Vulkan swap chain. Ordinary desktop apps don't, so they never get it. RTX HDR Desktop captures the screen and draws it again in a swap chain of its own, which the driver does convert.
 
-> **Status: experimental.** The capture, redraw, click-through and capture exclusion all work and are tested. The driver loads RTX HDR (`nvAIHDRx.dll`) into the app. Whether the picture actually looks HDR on your screen is for your eyes to judge, because RTX HDR's output can't be measured from a screen capture (see *How it works*).
+> **Status:** works on an RTX 5060 Laptop GPU with Windows 11 (checked by eye: the desktop turns HDR, and the Alt+Z RTX HDR sliders change it). RTX HDR's output can't be measured from a screen capture (see *How it works*), so judge it by eye on your setup too.
 
 ## Requirements
 
@@ -52,7 +52,9 @@ What the driver needs, as measured:
 
 ## Tuning RTX HDR
 
-The NVIDIA app's RTX HDR sliders follow the focused program, and this app never has focus. Set them on the **RTX HDR Desktop** profile in NVIDIA Profile Inspector instead (enable *show unknown settings* if they're hidden), click *Apply changes*, and restart the app:
+Press **Alt+Z** > **Game Filter** > **RTX HDR** and move the sliders (peak brightness, middle grey, contrast, saturation). They change the desktop. The mirror steps aside while NVIDIA's overlay is open, so close the overlay to see the result.
+
+Or set them on the **RTX HDR Desktop** profile in NVIDIA Profile Inspector (enable *show unknown settings* if they're hidden), click *Apply changes*, and restart the app:
 
 | Setting | ID | Meaning |
 | --- | --- | --- |
