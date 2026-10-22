@@ -47,9 +47,8 @@ using Microsoft::WRL::ComPtr;
 #define WM_TRAY (WM_APP + 1)
 
 enum { HK_QUIT = 1, HK_PAUSE, HK_FOLLOW, HK_RTXHDR };
-enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_SETTINGS, CMD_RTXHDR, CMD_AUTOSTART, CMD_EXIT, CMD_SCREEN0 = 200 };
+enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_SETTINGS, CMD_RTXHDR, CMD_AUTOSTART, CMD_ABOVESTART, CMD_EXIT, CMD_SCREEN0 = 200 };
 #define SETTINGS_CLASS L"RtxHdrDesktopSettings"
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ---------------------------------------------------------------------------
 // Logging: %TEMP%\rtx-hdr-desktop.log, plus the parent console when there is one.
@@ -218,6 +217,15 @@ static float sdrWhiteNits(const wchar_t* gdiName) {
     return 0;
 }
 
+static bool processHasUIAccess() {
+    HANDLE tok;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+    DWORD ui = 0, n = 0;
+    GetTokenInformation(tok, TokenUIAccess, &ui, sizeof ui, &n);
+    CloseHandle(tok);
+    return ui != 0;
+}
+
 static bool rtxHdrLoaded() {
     return GetModuleHandleW(L"nvAIHDR.dll") || GetModuleHandleW(L"nvAIHDRx.dll");
 }
@@ -254,6 +262,11 @@ struct App {
     // Off = the overlay is one pixel shorter than the monitor, which the driver
     // doesn't convert; the swap chain is made anew so no earlier decision sticks.
     bool rtxHdr = true;
+    // Stay above the Start menu, taskbar previews and flyouts. They cover the
+    // overlay otherwise, and the driver drops RTX HDR while the overlay is
+    // covered. Getting above the Start menu needs UIAccess (the band Magnifier
+    // uses); install-uiaccess.ps1 makes a signed copy that has it.
+    bool aboveStart = false;
     bool recreateSwap = false;
     HWND follow = nullptr;
     int screenIndex = 0;
@@ -594,7 +607,7 @@ static void placeOverlay(const RECT& area) {
     if (!g.rtxHdr) r.bottom -= 1;  // not the whole monitor: the driver leaves it SDR
     DWORD now = GetTickCount();
     bool moved = !EqualRect(&r, &g.view);
-    if (moved || !g.visible || now - g.lastTopmost > 1000) {
+    if (moved || !g.visible || now - g.lastTopmost > (g.aboveStart ? 100u : 1000u)) {
         SetWindowPos(g.overlay, HWND_TOPMOST, r.left, r.top, rw(r), rh(r), SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g.lastTopmost = now;
     }
@@ -913,6 +926,16 @@ static void setAutostart(bool on) {
     logf(on ? "start with Windows: on" : "start with Windows: off");
 }
 
+static void setAboveStart(bool on) {
+    g.aboveStart = on;
+    g.lastTopmost = 0;  // re-assert topmost right away
+    saveSettings();
+    logf(on ? (processHasUIAccess() ? "stay above the Start menu: on"
+                                    : "stay above popups: on (above the Start menu needs the UIAccess install)")
+            : "stay above the Start menu: off");
+    updateTrayTip();
+}
+
 static void showMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | MF_GRAYED, CMD_STATUS,
@@ -933,6 +956,9 @@ static void showMenu() {
     AppendMenuW(m, MF_STRING | (g.rtxHdr ? MF_CHECKED : 0), CMD_RTXHDR, L"RTX HDR (off = sharpening only)\tCtrl+Alt+F9");
     AppendMenuW(m, MF_STRING, CMD_SETTINGS, L"Settings (sharpness)...");
     AppendMenuW(m, MF_STRING | (autostartEnabled() ? MF_CHECKED : 0), CMD_AUTOSTART, L"Start with Windows");
+    AppendMenuW(m, MF_STRING | (g.aboveStart ? MF_CHECKED : 0), CMD_ABOVESTART,
+                processHasUIAccess() ? L"Stay above the Start menu and popups"
+                                     : L"Stay above popups (Start menu needs the UIAccess install)");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, CMD_EXIT, L"Exit\tCtrl+Alt+F12");
     POINT pt;
@@ -952,6 +978,8 @@ static void onCommand(UINT id) {
         setRtxHdr(!g.rtxHdr);
     } else if (id == CMD_AUTOSTART) {
         setAutostart(!autostartEnabled());
+    } else if (id == CMD_ABOVESTART) {
+        setAboveStart(!g.aboveStart);
     } else if (id == CMD_EXIT) {
         g.running = false;
     } else if (id == CMD_PAUSE) {
@@ -1014,6 +1042,7 @@ static void loadSettings() {
     std::wstring ini = settingsPath();
     g.sharpness = std::min(std::max((int)GetPrivateProfileIntW(L"picture", L"sharpness", 0, ini.c_str()), 0), 100);
     g.rtxHdr = GetPrivateProfileIntW(L"picture", L"rtxhdr", 1, ini.c_str()) != 0;
+    g.aboveStart = GetPrivateProfileIntW(L"app", L"abovestart", 0, ini.c_str()) != 0;
 }
 
 static void saveSettings() {
@@ -1022,6 +1051,7 @@ static void saveSettings() {
     swprintf_s(v, L"%d", g.sharpness);
     WritePrivateProfileStringW(L"picture", L"sharpness", v, ini.c_str());
     WritePrivateProfileStringW(L"picture", L"rtxhdr", g.rtxHdr ? L"1" : L"0", ini.c_str());
+    WritePrivateProfileStringW(L"app", L"abovestart", g.aboveStart ? L"1" : L"0", ini.c_str());
 }
 
 static void updateSharpLabel() {
