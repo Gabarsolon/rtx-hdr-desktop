@@ -711,7 +711,27 @@ static bool calibrate() {
     return true;
 }
 
+// NVIDIA's own overlay (Alt+Z) is a capture-excluded window: our mirror can't show
+// it and our topmost window covers it. Step aside while it has the focus.
+static bool nvidiaOverlayOpen() {
+    HWND fg = GetForegroundWindow();
+    wchar_t cls[64] = {};
+    if (fg) GetClassNameW(fg, cls, 64);
+    static std::wstring last;
+    bool open = !wcscmp(cls, L"CEF-OSC-WIDGET");
+    if (last != cls) {
+        last = cls;
+        logf("foreground window class: %s%s", narrow(cls).c_str(), open ? " (NVIDIA overlay - hiding)" : "");
+    }
+    return open;
+}
+
 static void tick() {
+    if (nvidiaOverlayOpen()) {
+        hideOverlay();
+        Sleep(16);
+        return;
+    }
     if (!g.screen.output && !selectScreen(g.opt.screen)) {
         Sleep(250);
         return;
