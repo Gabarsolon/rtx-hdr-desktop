@@ -64,6 +64,20 @@ Or set them on the **RTX HDR Desktop** profile in NVIDIA Profile Inspector (enab
 | TrueHDR contrast Control | `0x00DD48FE` | 100 = neutral |
 | TrueHDR Saturation Control | `0x00DD48FF` | 100 = neutral |
 
+## Staying above the Start menu (optional, UIAccess)
+
+The driver drops RTX HDR whenever something covers the mirror. Taskbar previews and other ordinary pop-ups are handled by the **Stay above popups** tray item. The **Start menu, tray flyout, notification centre and volume/brightness pop-ups** live in a layer only a *UIAccess* app can reach (the one Magnifier uses).
+
+To get there, install a signed copy (one-time, needs admin):
+
+```powershell
+.\install-uiaccess.ps1          # add -Startup to also launch it at sign-in
+```
+
+It copies the exe to `C:\Program Files\RTX HDR Desktop`, swaps in a `uiAccess="true"` manifest, creates a self-signed code-signing certificate, trusts it on this machine, and signs the copy. Then run that copy and tick **Stay above the Start menu and popups** in the tray.
+
+> Trusting a self-signed root certificate is a lasting change to what your machine trusts. Undo all of it with `.\uninstall-uiaccess.ps1`.
+
 ## Limits
 
 - The mouse cursor stays SDR, because Windows draws it on its own layer above everything.
