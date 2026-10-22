@@ -85,9 +85,9 @@ Remove-Item $pub -Force
 'Trusted the certificate (LocalMachine Root + TrustedPublisher).'
 
 # --- 4. sign the installed exe ----------------------------------------------
-& $signtool sign /sha1 $cert.Thumbprint /fd SHA256 $dest
+& $signtool sign /sm /sha1 $cert.Thumbprint /fd SHA256 $dest
 if ($LASTEXITCODE) {
-    try { & $signtool sign /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $dest } catch {}
+    try { & $signtool sign /sm /sha1 $cert.Thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $dest } catch {}
 }
 & $signtool verify /pa $dest
 if ($LASTEXITCODE) { throw "signature did not verify ($LASTEXITCODE)" }
