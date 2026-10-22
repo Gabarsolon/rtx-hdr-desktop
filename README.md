@@ -32,7 +32,7 @@ It runs in the tray. There is no window: the screen just looks like it does, but
 | **Ctrl+Alt+F11** | Pause / resume (compare HDR on and off) |
 | **Ctrl+Alt+F12** | Exit |
 
-The tray menu also lets you pick the screen and pick an app. Starting the exe a second time closes the running copy, so one shortcut toggles it.
+The tray menu also lets you pick the screen and pick an app, and opens **Settings** with a **sharpness** slider (contrast-adaptive sharpening, after AMD FidelityFX CAS, applied to the SDR picture before RTX HDR; 0 = off, saved in `%APPDATA%\RTX HDR Desktop\settings.ini`). Starting the exe a second time closes the running copy, so one shortcut toggles it.
 
 Options: `--screen N`, `--window "part of a window title"` (only while that window is in front), `--sdr-white NITS`, `--no-calibration`, `--hwnd`, `--list` (print the screens).
 
@@ -49,6 +49,17 @@ What the driver needs, as measured:
 - Being in the foreground doesn't matter.
 - So per-window HDR (only one window's rectangle) isn't possible. "One app" mode puts the whole screen in HDR while that app is in front.
 - Screen captures (Desktop Duplication) show the overlay's output identical with RTX HDR loaded or not. Either the driver applies RTX HDR after the point where Windows captures, or it doesn't apply to this window. Your eyes decide; Ctrl+Alt+F11 toggles for a side-by-side.
+
+## Tuning RTX HDR
+
+The NVIDIA app's RTX HDR sliders follow the focused program, and this app never has focus. Set them on the **RTX HDR Desktop** profile in NVIDIA Profile Inspector instead (enable *show unknown settings* if they're hidden), click *Apply changes*, and restart the app:
+
+| Setting | ID | Meaning |
+| --- | --- | --- |
+| TrueHDR Peak Brightness | `0x00DD48FC` | peak, nits |
+| TrueHDR Middle Grey | `0x00DD48FD` | middle grey, nits |
+| TrueHDR contrast Control | `0x00DD48FE` | 100 = neutral |
+| TrueHDR Saturation Control | `0x00DD48FF` | 100 = neutral |
 
 ## Limits
 

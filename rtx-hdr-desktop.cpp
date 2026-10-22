@@ -18,6 +18,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
+#include <commctrl.h>
+#include <share.h>
 #include <dwmapi.h>
 #include <d3d11_1.h>
 #include <dxgi1_6.h>
@@ -45,7 +47,9 @@ using Microsoft::WRL::ComPtr;
 #define WM_TRAY (WM_APP + 1)
 
 enum { HK_QUIT = 1, HK_PAUSE, HK_FOLLOW };
-enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_EXIT, CMD_SCREEN0 = 200 };
+enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_SETTINGS, CMD_EXIT, CMD_SCREEN0 = 200 };
+#define SETTINGS_CLASS L"RtxHdrDesktopSettings"
+#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ---------------------------------------------------------------------------
 // Logging: %TEMP%\rtx-hdr-desktop.log, plus the parent console when there is one.
@@ -85,12 +89,14 @@ static std::string narrow(const wchar_t* w) {
 // mode bit 2: test pattern instead of the capture (grey ramp across the area).
 // mode bit 3: calibration bands (CAL_STEPS grey steps across the area).
 // mode bit 4: `inv` holds a calibration; `scale` = 1 / captured value of white.
+// `sharp` > 0: contrast-adaptive sharpening (after AMD FidelityFX CAS, MIT) on
+// the SDR picture, before the driver's RTX HDR sees it.
 
 #define CAL_STEPS 64
 #define INV_SIZE 1024
 
 static const char kShader[] = R"(
-cbuffer C : register(b0) { int4 area; float scale; uint mode; float2 pad; };
+cbuffer C : register(b0) { int4 area; float scale; uint mode; float sharp; float pad; };
 Texture2D<float4> src : register(t0);
 Texture1D<float> inv : register(t1);
 SamplerState lin : register(s0);
@@ -104,13 +110,9 @@ float3 encodeSrgb(float3 c) {
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
 }
 
-float4 ps(float4 pos : SV_Position) : SV_Target {
-    int2 p = int2(pos.xy);
-    bool inside = p.x >= area.x && p.y >= area.y && p.x < area.z && p.y < area.w;
-    if ((mode & 2) && inside && p.x < area.x + 8 && p.y < area.y + 8) return float4(1, 0, 1, 1);
-    if (mode & 4) return float4(saturate((pos.xxx - area.x) / (area.z - area.x)), 1);
-    if (mode & 8) return float4(floor((pos.xxx - area.x) * 64 / (area.z - area.x)) / 63, 1);
-    float3 c = src.Load(int3(p, 0)).rgb;
+// The captured pixel at p, back as the SDR code value the app drew.
+float3 sdrAt(int2 p) {
+    float3 c = src.Load(int3(clamp(p, area.xy, area.zw - 1), 0)).rgb;
     if (mode & 16) {
         c = saturate(c * scale);
         c = c * (1023.0 / 1024) + 0.5 / 1024;  // texel centres of the 1024-entry curve
@@ -118,7 +120,31 @@ float4 ps(float4 pos : SV_Position) : SV_Target {
     } else if (mode & 1) {
         c = encodeSrgb(saturate(c * scale));
     }
-    return float4(c, 1);
+    return c;
+}
+
+float4 ps(float4 pos : SV_Position) : SV_Target {
+    int2 p = int2(pos.xy);
+    bool inside = p.x >= area.x && p.y >= area.y && p.x < area.z && p.y < area.w;
+    if ((mode & 2) && inside && p.x < area.x + 8 && p.y < area.y + 8) return float4(1, 0, 1, 1);
+    if (mode & 4) return float4(saturate((pos.xxx - area.x) / (area.z - area.x)), 1);
+    if (mode & 8) return float4(floor((pos.xxx - area.x) * 64 / (area.z - area.x)) / 63, 1);
+    float3 e = sdrAt(p);
+    if (sharp <= 0) return float4(e, 1);
+
+    // 3x3 neighbourhood:  a b c / d e f / g h i
+    float3 a = sdrAt(p + int2(-1, -1)), b = sdrAt(p + int2(0, -1)), c = sdrAt(p + int2(1, -1));
+    float3 d = sdrAt(p + int2(-1, 0)), f = sdrAt(p + int2(1, 0));
+    float3 g = sdrAt(p + int2(-1, 1)), h = sdrAt(p + int2(0, 1)), i = sdrAt(p + int2(1, 1));
+    float3 mn = min(min(min(d, e), min(f, b)), h);
+    float3 mx = max(max(max(d, e), max(f, b)), h);
+    mn += min(mn, min(min(a, c), min(g, i)));
+    mx += max(mx, max(max(a, c), max(g, i)));
+    // Less sharpening where the neighbourhood already has strong contrast.
+    float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1e-5)));
+    float3 w = amp * (-1.0 / lerp(8.0, 5.0, sharp));
+    float3 o = (b * w + d * w + f * w + h * w + e) / (1.0 + 4.0 * w);
+    return float4(saturate(o), 1);
 }
 )";
 
@@ -126,7 +152,8 @@ struct Constants {
     RECT area;
     float scale;
     UINT mode;
-    float pad[2];
+    float sharp;
+    float pad;
 };
 
 // ---------------------------------------------------------------------------
@@ -221,6 +248,8 @@ struct App {
     NOTIFYICONDATAW tray = {};
     UINT taskbarCreated = 0;
     bool running = true, paused = false, picking = false;
+    HWND settingsWnd = nullptr, sharpSlider = nullptr, sharpLabel = nullptr;
+    int sharpness = 0;  // 0-100, 0 = off; saved in settings.ini
     HWND follow = nullptr;
     int screenIndex = 0;
 
@@ -605,6 +634,7 @@ static void draw(bool bands = false) {
     c.area = g.area;
     OffsetRect(&c.area, -mon.left, -mon.top);
     c.scale = g.scale;
+    c.sharp = g.sharpness / 100.0f;
     c.mode = (g.frameFormat == DXGI_FORMAT_R16G16B16A16_FLOAT ? 1u : 0u) | (g.opt.selftestSeconds ? 2u : 0u) |
              (g.opt.pattern ? 4u : 0u) | (bands ? 8u : 0u) | (g.calibrated ? 16u : 0u);
     g.ctx->UpdateSubresource(g.cb.Get(), 0, nullptr, &c, 0, 0);
@@ -843,6 +873,8 @@ static void showMenu() {
                           : L"Only while one app is in front: pick it...   (Ctrl+Alt+F10 = the active one)");
     AppendMenuW(m, MF_STRING | (g.paused ? MF_CHECKED : 0), CMD_PAUSE, L"Pause\tCtrl+Alt+F11");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, CMD_SETTINGS, L"Settings (sharpness)...");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, CMD_EXIT, L"Exit\tCtrl+Alt+F12");
     POINT pt;
     GetCursorPos(&pt);
@@ -852,8 +884,12 @@ static void showMenu() {
     DestroyMenu(m);
 }
 
+static void openSettings();
+
 static void onCommand(UINT id) {
-    if (id == CMD_EXIT) {
+    if (id == CMD_SETTINGS) {
+        openSettings();
+    } else if (id == CMD_EXIT) {
         g.running = false;
     } else if (id == CMD_PAUSE) {
         setPaused(!g.paused);
@@ -897,6 +933,86 @@ static LRESULT CALLBACK ctrlProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
+}
+
+// ---------------------------------------------------------------------------
+// Settings: %APPDATA%\RTX HDR Desktop\settings.ini and a small window with sliders.
+
+static std::wstring settingsPath() {
+    wchar_t dir[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"APPDATA", dir, MAX_PATH)) return L"";
+    std::wstring d = std::wstring(dir) + L"\\RTX HDR Desktop";
+    CreateDirectoryW(d.c_str(), nullptr);
+    return d + L"\\settings.ini";
+}
+
+static void loadSettings() {
+    g.sharpness = std::min(std::max((int)GetPrivateProfileIntW(L"picture", L"sharpness", 0, settingsPath().c_str()), 0), 100);
+}
+
+static void saveSettings() {
+    wchar_t v[16];
+    swprintf_s(v, L"%d", g.sharpness);
+    WritePrivateProfileStringW(L"picture", L"sharpness", v, settingsPath().c_str());
+}
+
+static void updateSharpLabel() {
+    wchar_t t[64];
+    if (g.sharpness) swprintf_s(t, L"Sharpness: %d", g.sharpness);
+    else wcscpy_s(t, L"Sharpness: off");
+    SetWindowTextW(g.sharpLabel, t);
+}
+
+static LRESULT CALLBACK settingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_HSCROLL:
+        if ((HWND)lp == g.sharpSlider) {
+            g.sharpness = (int)SendMessageW(g.sharpSlider, TBM_GETPOS, 0, 0);
+            updateSharpLabel();
+            g.dirty = true;
+            if (LOWORD(wp) == TB_ENDTRACK || LOWORD(wp) == TB_THUMBPOSITION) saveSettings();
+        }
+        return 0;
+    case WM_CLOSE:
+        saveSettings();
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        g.settingsWnd = g.sharpSlider = g.sharpLabel = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+static void openSettings() {
+    if (g.settingsWnd) {
+        SetForegroundWindow(g.settingsWnd);
+        return;
+    }
+    float s = GetDpiForSystem() / 96.0f;
+    auto px = [s](int v) { return (int)(v * s); };
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int w = px(360), hgt = px(150);
+    g.settingsWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SETTINGS_CLASS, APP_NAME L" settings",
+                                    WS_POPUP | WS_CAPTION | WS_SYSMENU, wa.right - w - px(16), wa.bottom - hgt - px(16), w, hgt,
+                                    nullptr, nullptr, g.inst, nullptr);
+    NONCLIENTMETRICSW ncm = {sizeof ncm};
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, GetDpiForSystem());
+    static HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
+    g.sharpLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, px(16), px(14), px(320), px(20), g.settingsWnd,
+                                   nullptr, g.inst, nullptr);
+    g.sharpSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS, px(8), px(38),
+                                    px(330), px(30), g.settingsWnd, nullptr, g.inst, nullptr);
+    HWND hint = CreateWindowExW(0, L"STATIC", L"Sharpens the picture before RTX HDR. 0 = off.", WS_CHILD | WS_VISIBLE, px(16),
+                                px(74), px(320), px(20), g.settingsWnd, nullptr, g.inst, nullptr);
+    for (HWND c : {g.sharpLabel, g.sharpSlider, hint}) SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(g.sharpSlider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+    SendMessageW(g.sharpSlider, TBM_SETPAGESIZE, 0, 10);
+    SendMessageW(g.sharpSlider, TBM_SETPOS, TRUE, g.sharpness);
+    updateSharpLabel();
+    ShowWindow(g.settingsWnd, SW_SHOW);
+    SetForegroundWindow(g.settingsWnd);
 }
 
 static LRESULT CALLBACK overlayProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1039,7 +1155,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wchar_t logPath[MAX_PATH];
     GetTempPathW(MAX_PATH, logPath);
     wcscat_s(logPath, g.opt.measureSeconds ? L"rtx-hdr-desktop-measure.log" : L"rtx-hdr-desktop.log");
-    _wfopen_s(&g_log, logPath, L"w");
+    g_log = _wfsopen(logPath, L"w", _SH_DENYWR);  // others may read it while we run
     logf("RTX HDR Desktop " APP_VERSION);
     if (g.opt.list) {
         listScreens();
@@ -1068,6 +1184,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = OVERLAY_CLASS;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = settingsProc;
+    wc.lpszClassName = SETTINGS_CLASS;
+    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    RegisterClassExW(&wc);
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_BAR_CLASSES};
+    InitCommonControlsEx(&icc);
+    loadSettings();
 
     g.ctrl = CreateWindowExW(WS_EX_TOOLWINDOW, CTRL_CLASS, APP_NAME, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED;
