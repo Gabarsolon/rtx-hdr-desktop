@@ -46,8 +46,8 @@ using Microsoft::WRL::ComPtr;
 #define OVERLAY_CLASS L"RtxHdrDesktopOverlay"
 #define WM_TRAY (WM_APP + 1)
 
-enum { HK_QUIT = 1, HK_PAUSE, HK_FOLLOW };
-enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_SETTINGS, CMD_EXIT, CMD_SCREEN0 = 200 };
+enum { HK_QUIT = 1, HK_PAUSE, HK_FOLLOW, HK_RTXHDR };
+enum { CMD_STATUS = 100, CMD_PAUSE, CMD_PICK, CMD_SETTINGS, CMD_RTXHDR, CMD_AUTOSTART, CMD_EXIT, CMD_SCREEN0 = 200 };
 #define SETTINGS_CLASS L"RtxHdrDesktopSettings"
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -250,6 +250,11 @@ struct App {
     bool running = true, paused = false, picking = false;
     HWND settingsWnd = nullptr, sharpSlider = nullptr, sharpLabel = nullptr;
     int sharpness = 0;  // 0-100, 0 = off; saved in settings.ini
+    // RTX HDR on/off without stopping the mirror (so sharpening alone still works).
+    // Off = the overlay is one pixel shorter than the monitor, which the driver
+    // doesn't convert; the swap chain is made anew so no earlier decision sticks.
+    bool rtxHdr = true;
+    bool recreateSwap = false;
     HWND follow = nullptr;
     int screenIndex = 0;
 
@@ -439,7 +444,22 @@ static bool createSwapChain(UINT w, UINT h) {
     return true;
 }
 
+static void releaseSwapChain() {
+    g.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    g.ctx->ClearState();
+    g.ctx->Flush();
+    g.dvisual.Reset();
+    g.dtarget.Reset();
+    g.dcomp.Reset();
+    g.swap.Reset();
+    g.swapW = g.swapH = 0;
+}
+
 static bool ensureSwapChain(UINT w, UINT h) {
+    if (g.recreateSwap) {
+        releaseSwapChain();
+        g.recreateSwap = false;
+    }
     if (!g.swap) {
         if (!createSwapChain(w, h)) return false;
     } else if (w != g.swapW || h != g.swapH) {
@@ -541,6 +561,7 @@ static bool selectScreen(int index) {
 // in one-window mode, whenever that window isn't the one in front.
 
 static bool wantedArea(RECT& out) {
+    if (!g.rtxHdr && g.sharpness == 0) return false;  // nothing to add to the screen
     if (g.follow) {
         if (!IsWindow(g.follow)) {
             logf("followed window closed");
@@ -570,6 +591,7 @@ static void hideOverlay() {
 
 static void placeOverlay(const RECT& area) {
     RECT r = screenRect(g.screen);
+    if (!g.rtxHdr) r.bottom -= 1;  // not the whole monitor: the driver leaves it SDR
     DWORD now = GetTickCount();
     bool moved = !EqualRect(&r, &g.view);
     if (moved || !g.visible || now - g.lastTopmost > 1000) {
@@ -826,8 +848,9 @@ static void tick() {
 
 static void updateTrayTip() {
     if (!g.tray.cbSize) return;
-    swprintf_s(g.tray.szTip, L"%s - %s%s", APP_NAME, g.paused ? L"paused" : g.follow ? L"with one app in front" : L"whole screen",
-               rtxHdrLoaded() ? L", RTX HDR loaded" : L", RTX HDR not loaded");
+    swprintf_s(g.tray.szTip, L"%s - %s%s", APP_NAME,
+               g.paused ? L"paused" : !g.rtxHdr ? L"RTX HDR off" : g.follow ? L"with one app in front" : L"whole screen",
+               !g.rtxHdr ? L"" : rtxHdrLoaded() ? L", RTX HDR loaded" : L", RTX HDR not loaded");
     g.tray.uFlags = NIF_TIP;
     Shell_NotifyIconW(NIM_MODIFY, &g.tray);
 }
@@ -856,6 +879,40 @@ static void setPaused(bool p) {
     updateTrayTip();
 }
 
+static void saveSettings();
+
+static void setRtxHdr(bool on) {
+    g.rtxHdr = on;
+    g.recreateSwap = true;
+    g.dirty = true;
+    saveSettings();
+    logf(on ? "RTX HDR on" : "RTX HDR off (sharpening only)");
+    updateTrayTip();
+}
+
+// Start with Windows: a value under HKCU\...\Run pointing at this exe.
+static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+static bool autostartEnabled() {
+    DWORD size = 0;
+    return RegGetValueW(HKEY_CURRENT_USER, kRunKey, APP_NAME, RRF_RT_REG_SZ, nullptr, nullptr, &size) == ERROR_SUCCESS;
+}
+
+static void setAutostart(bool on) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    if (on) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring cmd = L"\"" + std::wstring(exe) + L"\"";
+        RegSetValueExW(key, APP_NAME, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, APP_NAME);
+    }
+    RegCloseKey(key);
+    logf(on ? "start with Windows: on" : "start with Windows: off");
+}
+
 static void showMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | MF_GRAYED, CMD_STATUS,
@@ -871,9 +928,11 @@ static void showMenu() {
     AppendMenuW(m, MF_STRING | (g.follow || g.picking ? MF_CHECKED : 0), CMD_PICK,
                 g.picking ? L"Only with one app in front: click its window now..."
                           : L"Only while one app is in front: pick it...   (Ctrl+Alt+F10 = the active one)");
-    AppendMenuW(m, MF_STRING | (g.paused ? MF_CHECKED : 0), CMD_PAUSE, L"Pause\tCtrl+Alt+F11");
+    AppendMenuW(m, MF_STRING | (g.paused ? MF_CHECKED : 0), CMD_PAUSE, L"Pause everything\tCtrl+Alt+F11");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING | (g.rtxHdr ? MF_CHECKED : 0), CMD_RTXHDR, L"RTX HDR (off = sharpening only)\tCtrl+Alt+F9");
     AppendMenuW(m, MF_STRING, CMD_SETTINGS, L"Settings (sharpness)...");
+    AppendMenuW(m, MF_STRING | (autostartEnabled() ? MF_CHECKED : 0), CMD_AUTOSTART, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, CMD_EXIT, L"Exit\tCtrl+Alt+F12");
     POINT pt;
@@ -889,6 +948,10 @@ static void openSettings();
 static void onCommand(UINT id) {
     if (id == CMD_SETTINGS) {
         openSettings();
+    } else if (id == CMD_RTXHDR) {
+        setRtxHdr(!g.rtxHdr);
+    } else if (id == CMD_AUTOSTART) {
+        setAutostart(!autostartEnabled());
     } else if (id == CMD_EXIT) {
         g.running = false;
     } else if (id == CMD_PAUSE) {
@@ -922,6 +985,7 @@ static LRESULT CALLBACK ctrlProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_HOTKEY:
         if (wp == HK_QUIT) g.running = false;
         else if (wp == HK_PAUSE) setPaused(!g.paused);
+        else if (wp == HK_RTXHDR) setRtxHdr(!g.rtxHdr);
         else if (wp == HK_FOLLOW) {
             HWND fg = GetForegroundWindow();
             if (g.follow || isShellOrOwn(fg)) setFollow(nullptr);
@@ -947,13 +1011,17 @@ static std::wstring settingsPath() {
 }
 
 static void loadSettings() {
-    g.sharpness = std::min(std::max((int)GetPrivateProfileIntW(L"picture", L"sharpness", 0, settingsPath().c_str()), 0), 100);
+    std::wstring ini = settingsPath();
+    g.sharpness = std::min(std::max((int)GetPrivateProfileIntW(L"picture", L"sharpness", 0, ini.c_str()), 0), 100);
+    g.rtxHdr = GetPrivateProfileIntW(L"picture", L"rtxhdr", 1, ini.c_str()) != 0;
 }
 
 static void saveSettings() {
+    std::wstring ini = settingsPath();
     wchar_t v[16];
     swprintf_s(v, L"%d", g.sharpness);
-    WritePrivateProfileStringW(L"picture", L"sharpness", v, settingsPath().c_str());
+    WritePrivateProfileStringW(L"picture", L"sharpness", v, ini.c_str());
+    WritePrivateProfileStringW(L"picture", L"rtxhdr", g.rtxHdr ? L"1" : L"0", ini.c_str());
 }
 
 static void updateSharpLabel() {
@@ -1214,6 +1282,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterHotKey(g.ctrl, HK_QUIT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F12);
     RegisterHotKey(g.ctrl, HK_PAUSE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F11);
     RegisterHotKey(g.ctrl, HK_FOLLOW, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F10);
+    RegisterHotKey(g.ctrl, HK_RTXHDR, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F9);
     g.pickHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, onForeground, 0, 0, WINEVENT_OUTOFCONTEXT);
     g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     addTray();

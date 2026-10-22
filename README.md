@@ -29,10 +29,11 @@ It runs in the tray. There is no window: the screen just looks like it does, but
 | Key | Does |
 | --- | --- |
 | **Ctrl+Alt+F10** | Only while the active app is in front / back to the whole screen |
-| **Ctrl+Alt+F11** | Pause / resume (compare HDR on and off) |
+| **Ctrl+Alt+F9** | RTX HDR on / off. Off keeps the sharpening (the mirror is then one pixel shorter than the screen, which the driver leaves SDR) |
+| **Ctrl+Alt+F11** | Pause / resume everything |
 | **Ctrl+Alt+F12** | Exit |
 
-The tray menu also lets you pick the screen and pick an app, and opens **Settings** with a **sharpness** slider (contrast-adaptive sharpening, after AMD FidelityFX CAS, applied to the SDR picture before RTX HDR; 0 = off, saved in `%APPDATA%\RTX HDR Desktop\settings.ini`). Starting the exe a second time closes the running copy, so one shortcut toggles it.
+The tray menu also lets you pick the screen and pick an app, and opens **Settings** with a **sharpness** slider (contrast-adaptive sharpening, after AMD FidelityFX CAS, applied to the SDR picture before RTX HDR; 0 = off, saved in `%APPDATA%\RTX HDR Desktop\settings.ini`). **Start with Windows** in the tray menu adds it to your sign-in programs (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). Starting the exe a second time closes the running copy, so one shortcut toggles it.
 
 Options: `--screen N`, `--window "part of a window title"` (only while that window is in front), `--sdr-white NITS`, `--no-calibration`, `--hwnd`, `--list` (print the screens).
 
